@@ -18,6 +18,7 @@ use crate::render::atlas::{AtlasEntry, GlyphCache};
 use crate::text::font::{CellMetrics, FaceStyle, FontId};
 use zellij_utils::input::terminal::OpacityMode;
 
+mod bidi;
 mod decorations;
 mod glyphs;
 mod images;
@@ -126,6 +127,7 @@ impl Run {
     }
 }
 
+#[derive(Clone, Copy)]
 struct RowCell {
     cell: WireCell,
     occupancy: Occupancy,
@@ -139,6 +141,7 @@ struct RowCell {
     continuation: bool,
     complex: bool,
     unit_end: usize,
+    source: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -663,8 +666,10 @@ pub fn build_row(
             continuation: occupancy != Occupancy::WideTail && cell.is_group_continuation(),
             complex: false,
             unit_end: 0,
+            source: col,
         });
     }
+    bidi::reorder_row(context, row, row_paints);
     mark_units(row_paints);
 
     shaped.clear();
@@ -677,7 +682,7 @@ pub fn build_row(
                 &row_paints[col],
                 state.geometry(),
                 row,
-                col,
+                row_paints[col].source,
                 context.cursor_breaks_runs,
             ));
         }
@@ -714,6 +719,7 @@ pub fn build_row(
             held,
             complex,
             unit_end,
+            source,
             ..
         } = row_paints[col];
         if held {
@@ -763,7 +769,7 @@ pub fn build_row(
 
         push_decorations(out, context, cell, &paint, (origin_x, origin_y), inkless);
 
-        if !composing && !inkless && context.hovered_link.is_some_and(|run| run.covers(row, col)) {
+        if !composing && !inkless && context.hovered_link.is_some_and(|run| run.covers(row, source)) {
             push_hover_underline(
                 out,
                 &paint,

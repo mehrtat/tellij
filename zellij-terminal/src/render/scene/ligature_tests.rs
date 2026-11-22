@@ -98,6 +98,7 @@ fn uniform_cells(count: usize, character: char) -> Vec<RowCell> {
             continuation: false,
             complex: false,
             unit_end: 0,
+            source: 0,
         })
         .collect()
 }
