@@ -1394,6 +1394,7 @@ fn nothing_spreads_past_the_last_column_or_into_a_neighbour_with_text() {
                     continuation: false,
                     complex: false,
                     unit_end: col + 1,
+                    source: col,
                 }
             })
             .collect();

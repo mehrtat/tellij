@@ -113,6 +113,7 @@ pub fn ligating_sequences(state: &TerminalState, cache: &mut GlyphCache) -> Vec<
                     continuation: occupancy != Occupancy::WideTail && cell.is_group_continuation(),
                     complex: false,
                     unit_end: 0,
+                    source: col,
                 }
             })
             .collect();

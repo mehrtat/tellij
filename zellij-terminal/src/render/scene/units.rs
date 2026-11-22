@@ -69,14 +69,14 @@ pub(super) fn push_unit(
         .filter(|col| cells[*col].occupancy != Occupancy::WideTail)
         .collect();
     let key = match heads.as_slice() {
-        [only] => match context.cluster_at(row, *only) {
+        [only] => match context.cluster_at(row, cells[*only].source) {
             Some(cluster) => GlyphKey::shared(&cluster),
             None => GlyphKey::Char(cells[*only].cell.character()),
         },
         _ => {
             text.clear();
             for col in &heads {
-                context.push_text_to(row, *col, text);
+                context.push_text_to(row, cells[*col].source, text);
             }
             GlyphKey::of(text)
         },
@@ -124,7 +124,7 @@ pub(super) fn push_unit_cell(
         end += 1;
     }
     let origin_x = (col as u32 * metrics.width) as i32;
-    if let Some(cluster) = context.cluster_at(row, col) {
+    if let Some(cluster) = context.cluster_at(row, entry.source) {
         let budget = (end - col) as u32;
         match cache.cluster_glyph(entry.paint.style, &GlyphKey::shared(&cluster), budget) {
             ClusterLookup::Sprite(rendered) => {
