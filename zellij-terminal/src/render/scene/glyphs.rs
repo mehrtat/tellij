@@ -60,7 +60,10 @@ pub(super) fn spill_room(
     let Some(next) = cells.get(col + 1) else {
         return 0;
     };
+    // A right-to-left letter never spreads: centred over two cells it
+    // would drift off its own cell and away from the letters it joins.
     let spreads = cells[col].occupancy == Occupancy::Single
+        && !super::bidi::is_rtl_char(cells[col].cell.character())
         && next.occupancy == Occupancy::Single
         && !next.composing
         && !next.held

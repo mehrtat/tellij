@@ -1403,6 +1403,7 @@ fn nothing_spreads_past_the_last_column_or_into_a_neighbour_with_text() {
     assert_eq!(spill("ab ", 0), 0);
     assert_eq!(spill("a  ", 0), 1);
     assert_eq!(spill("ab ", 2), 0);
+    assert_eq!(spill("\u{fe8d}  ", 0), 0, "an alef spread into the blank after it");
 }
 
 #[test]
