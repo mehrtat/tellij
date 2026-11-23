@@ -7,6 +7,7 @@ use crate::input::momentum::{self, Touch};
 use crate::input::mouse::{self};
 use crate::platform::Platform;
 use crate::render::retained::{self};
+use crate::render::scene::bidi;
 use crate::window::desktop::grips::{grip_at, Grip};
 use crate::window::desktop::{hover, start_grip, Hover, WindowOps};
 use crate::window::App;
@@ -170,8 +171,20 @@ impl App {
         true
     }
 
-    pub(in crate::window) fn selection_cell(&self) -> Option<(usize, usize)> {
+    /// The pointer's cell in the grid's logical order: right-to-left rows
+    /// are drawn reordered, so the column under the pointer is mapped back.
+    fn logical_cell_if_inside(&self) -> Option<(u16, u16)> {
         let (x, y) = self.mouse.pointer.cell_if_inside(self.geometry.get())?;
+        Some((self.logical_x(x, y), y))
+    }
+
+    fn logical_x(&self, x: u16, y: u16) -> u16 {
+        let col = bidi::logical_column(&self.state, y as usize, x as usize);
+        u16::try_from(col).unwrap_or(x)
+    }
+
+    pub(in crate::window) fn selection_cell(&self) -> Option<(usize, usize)> {
+        let (x, y) = self.logical_cell_if_inside()?;
         let size = self.state.size();
         Some((
             (y as usize).min(size.rows.saturating_sub(1)),
@@ -261,7 +274,7 @@ impl App {
         if button != winit::event::MouseButton::Left {
             return false;
         }
-        let cell = self.mouse.pointer.cell_if_inside(self.geometry.get());
+        let cell = self.logical_cell_if_inside();
         if state.is_pressed() {
             if self.refresh_hover() {
                 self.refresh_pointer();
@@ -305,9 +318,7 @@ impl App {
 
     pub(in crate::window) fn refresh_hover(&mut self) -> bool {
         let hovered = self
-            .mouse
-            .pointer
-            .cell_if_inside(self.geometry.get())
+            .logical_cell_if_inside()
             .and_then(|(x, y)| links::run_at(self.state.screen(), y as usize, x as usize));
         if hovered == self.mouse.hovered_link {
             return false;
@@ -514,7 +525,13 @@ impl App {
     }
 
     pub(in crate::window) fn point<I: IntoIterator<Item = MouseEvent>>(&mut self, events: I) {
-        for event in events {
+        for mut event in events {
+            if let (Ok(y), Ok(x)) = (
+                u16::try_from(event.position.line.0),
+                u16::try_from(event.position.column.0),
+            ) {
+                event.position.column.0 = self.logical_x(x, y) as usize;
+            }
             if let Err(e) = self.tell(mouse::message(event)) {
                 report!("failed to send a mouse event: {}", e);
             }

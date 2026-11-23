@@ -18,7 +18,7 @@ use crate::render::atlas::{AtlasEntry, GlyphCache};
 use crate::text::font::{CellMetrics, FaceStyle, FontId};
 use zellij_utils::input::terminal::OpacityMode;
 
-mod bidi;
+pub mod bidi;
 mod decorations;
 mod glyphs;
 mod images;
