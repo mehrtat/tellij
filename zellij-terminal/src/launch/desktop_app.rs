@@ -121,7 +121,7 @@ fn close_older(dir: &std::path::Path, version: &str) -> Result<bool> {
 }
 
 fn relaunch() -> Result<()> {
-    let program = std::env::current_exe()
+    let program = crate::session::spawn::resolve_program()
         .map_err(|e| anyhow!("failed to locate this executable to start it again: {}", e))?;
     let mut command = std::process::Command::new(program);
     command.args(std::env::args_os().skip(1));
