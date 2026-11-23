@@ -21,11 +21,20 @@ const TATWEEL: char = '\u{640}';
 
 pub(super) fn reorder_row(context: &RowContext<'_>, row: usize, cells: &mut [RowCell]) {
     let geometry = context.state.geometry();
+    let segments: Vec<Option<usize>> = cells
+        .iter()
+        .enumerate()
+        .map(|(col, entry)| {
+            (!is_wall(entry.cell.character()))
+                .then(|| region_of(geometry, row, col))
+                .flatten()
+        })
+        .collect();
     let mut start = 0;
     while start < cells.len() {
-        let region = region_of(geometry, row, start);
+        let region = segments[start];
         let mut end = start + 1;
-        while end < cells.len() && region_of(geometry, row, end) == region {
+        while end < cells.len() && segments[end] == region {
             end += 1;
         }
         if region.is_some() {
@@ -33,6 +42,13 @@ pub(super) fn reorder_row(context: &RowContext<'_>, row: usize, cells: &mut [Row
         }
         start = end;
     }
+}
+
+/// Box-drawing and block characters fence a segment: a frame, a sidebar
+/// border or a table column rule stays where it is, and the text on each
+/// side of it is reordered on its own.
+fn is_wall(c: char) -> bool {
+    matches!(c, '\u{2500}'..='\u{259f}')
 }
 
 struct Unit {
@@ -101,19 +117,24 @@ pub fn logical_column(state: &TerminalState, row: usize, col: usize) -> usize {
         return col;
     }
     let geometry = state.geometry();
-    let region = region_of(geometry, row, col);
+    let screen = state.screen();
+    let segment_of = |at: usize| {
+        (!is_wall(screen.cell(row, at).character()))
+            .then(|| region_of(geometry, row, at))
+            .flatten()
+    };
+    let region = segment_of(col);
     if region.is_none() {
         return col;
     }
     let mut start = col;
-    while start > 0 && region_of(geometry, row, start - 1) == region {
+    while start > 0 && segment_of(start - 1) == region {
         start -= 1;
     }
     let mut end = col + 1;
-    while end < size.cols && region_of(geometry, row, end) == region {
+    while end < size.cols && segment_of(end) == region {
         end += 1;
     }
-    let screen = state.screen();
     let units = units_of(
         end - start,
         |at| {
@@ -483,6 +504,19 @@ mod tests {
 
         let latin = Painter::state(1, 10, |painter| painter.text(0, 0, "hello"));
         assert_eq!(logical_column(&latin, 0, 3), 3);
+    }
+
+    #[test]
+    fn a_frame_border_stays_put_and_each_side_reorders_alone() {
+        use crate::testing::painter::Painter;
+
+        // «ab │سلام  »: the bar stays at column 3, the Persian is
+        // right-aligned between the bar and the row end.
+        let state = Painter::state(1, 10, |painter| painter.text(0, 0, "ab │سلام"));
+        assert_eq!(logical_column(&state, 0, 3), 3);
+        assert_eq!(logical_column(&state, 0, 0), 0);
+        assert_eq!(logical_column(&state, 0, 9), 4);
+        assert_eq!(logical_column(&state, 0, 4), 9);
     }
 
     #[test]
