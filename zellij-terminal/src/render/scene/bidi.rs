@@ -8,11 +8,12 @@
 //! characters and grapheme groups stay together), and every cell keeps its
 //! logical column in `RowCell::source` for cluster, cursor and link lookups.
 
-use unicode_bidi::{BidiInfo, Level};
+use unicode_bidi::{bidi_class, BidiClass, BidiInfo, Level};
 
 use super::runs::region_of;
 use super::{RowCell, RowContext};
 use crate::emulation::screen_buffer::Occupancy;
+use crate::emulation::terminal::TerminalState;
 
 const ZWNJ: char = '\u{200c}';
 const ZWJ: char = '\u{200d}';
@@ -20,11 +21,20 @@ const TATWEEL: char = '\u{640}';
 
 pub(super) fn reorder_row(context: &RowContext<'_>, row: usize, cells: &mut [RowCell]) {
     let geometry = context.state.geometry();
+    let segments: Vec<Option<usize>> = cells
+        .iter()
+        .enumerate()
+        .map(|(col, entry)| {
+            (!is_wall(entry.cell.character()))
+                .then(|| region_of(geometry, row, col))
+                .flatten()
+        })
+        .collect();
     let mut start = 0;
     while start < cells.len() {
-        let region = region_of(geometry, row, start);
+        let region = segments[start];
         let mut end = start + 1;
-        while end < cells.len() && region_of(geometry, row, end) == region {
+        while end < cells.len() && segments[end] == region {
             end += 1;
         }
         if region.is_some() {
@@ -32,6 +42,13 @@ pub(super) fn reorder_row(context: &RowContext<'_>, row: usize, cells: &mut [Row
         }
         start = end;
     }
+}
+
+/// Box-drawing and block characters fence a segment: a frame, a sidebar
+/// border or a table column rule stays where it is, and the text on each
+/// side of it is reordered on its own.
+fn is_wall(c: char) -> bool {
+    matches!(c, '\u{2500}'..='\u{259f}')
 }
 
 struct Unit {
@@ -42,45 +59,128 @@ struct Unit {
     plain: bool,
 }
 
-fn reorder_segment(context: &RowContext<'_>, row: usize, cells: &mut [RowCell]) {
-    let mut units = Vec::new();
-    let mut any_rtl = false;
-    let mut col = 0;
-    while col < cells.len() {
-        let mut end = col + 1;
-        while end < cells.len()
-            && (cells[end].occupancy == Occupancy::WideTail || cells[end].continuation)
-        {
-            end += 1;
-        }
-        let unit = match cells[col].cluster.then(|| context.cluster_at(row, cells[col].source)) {
-            Some(Some(text)) => {
+impl Unit {
+    fn of(start: usize, end: usize, base: char, cluster: Option<&str>) -> Self {
+        match cluster {
+            Some(text) => {
                 let mut chars = text.chars();
                 let base = chars.next().unwrap_or(' ');
                 let rest: Vec<char> = chars.collect();
                 Unit {
-                    start: col,
+                    start,
                     end,
                     base,
                     breaks_join: rest.contains(&ZWNJ),
                     plain: rest.iter().all(|c| *c == ZWNJ || *c == ZWJ),
                 }
             },
-            _ => Unit {
-                start: col,
+            None => Unit {
+                start,
                 end,
-                base: cells[col].cell.character(),
+                base,
                 breaks_join: false,
                 plain: true,
             },
-        };
-        any_rtl |= is_rtl_char(unit.base);
-        units.push(unit);
+        }
+    }
+}
+
+/// Groups `len` cells into units (a cell for which `joins_previous` holds
+/// belongs to the unit before it) and reports whether any unit is
+/// right-to-left.
+fn units_of(
+    len: usize,
+    joins_previous: impl Fn(usize) -> bool,
+    unit: impl Fn(usize, usize) -> Unit,
+) -> Option<Vec<Unit>> {
+    let mut units = Vec::new();
+    let mut any_rtl = false;
+    let mut col = 0;
+    while col < len {
+        let mut end = col + 1;
+        while end < len && joins_previous(end) {
+            end += 1;
+        }
+        let made = unit(col, end);
+        any_rtl |= is_rtl_char(made.base);
+        units.push(made);
         col = end;
     }
-    if !any_rtl {
-        return;
+    any_rtl.then_some(units)
+}
+
+/// The logical column drawn at visual column `col` of `row`, so a click or a
+/// drag on reordered right-to-left text lands on the cell the eye sees.
+pub fn logical_column(state: &TerminalState, row: usize, col: usize) -> usize {
+    let size = state.size();
+    if row >= size.rows || col >= size.cols {
+        return col;
     }
+    let geometry = state.geometry();
+    let screen = state.screen();
+    let segment_of = |at: usize| {
+        (!is_wall(screen.cell(row, at).character()))
+            .then(|| region_of(geometry, row, at))
+            .flatten()
+    };
+    let region = segment_of(col);
+    if region.is_none() {
+        return col;
+    }
+    let mut start = col;
+    while start > 0 && segment_of(start - 1) == region {
+        start -= 1;
+    }
+    let mut end = col + 1;
+    while end < size.cols && segment_of(end) == region {
+        end += 1;
+    }
+    let units = units_of(
+        end - start,
+        |at| {
+            let occupancy = state.occupancy(row, start + at);
+            occupancy == Occupancy::WideTail
+                || screen.cell(row, start + at).is_group_continuation()
+        },
+        |from, to| {
+            let cluster = screen.cluster_at(row, start + from);
+            let base = screen.cell(row, start + from).character();
+            Unit::of(from, to, base, cluster.map(|text| &**text))
+        },
+    );
+    let Some(units) = units else {
+        return col;
+    };
+    let bases: Vec<char> = units.iter().map(|unit| unit.base).collect();
+    let (order, _) = visual_order(&bases);
+    let mut at = start;
+    for index in order {
+        let unit = &units[index];
+        let width = unit.end - unit.start;
+        if col < at + width {
+            return start + unit.start + (col - at);
+        }
+        at += width;
+    }
+    col
+}
+
+fn reorder_segment(context: &RowContext<'_>, row: usize, cells: &mut [RowCell]) {
+    let units = units_of(
+        cells.len(),
+        |at| cells[at].occupancy == Occupancy::WideTail || cells[at].continuation,
+        |from, to| {
+            let head = &cells[from];
+            let cluster = head
+                .cluster
+                .then(|| context.cluster_at(row, head.source))
+                .flatten();
+            Unit::of(from, to, head.cell.character(), cluster.as_deref())
+        },
+    );
+    let Some(units) = units else {
+        return;
+    };
 
     let bases: Vec<char> = units.iter().map(|unit| unit.base).collect();
     let breaks: Vec<bool> = units.iter().map(|unit| unit.breaks_join).collect();
@@ -121,7 +221,7 @@ pub(super) fn visual_order(bases: &[char]) -> (Vec<usize>, Vec<bool>) {
         .iter()
         .map(|c| if c.is_control() || *c == '\u{2029}' { ' ' } else { *c })
         .collect();
-    let info = BidiInfo::new(&text, None);
+    let info = BidiInfo::new(&text, Some(paragraph_level(bases)));
     let Some(paragraph) = info.paragraphs.first() else {
         return ((0..bases.len()).collect(), vec![false; bases.len()]);
     };
@@ -129,6 +229,25 @@ pub(super) fn visual_order(bases: &[char]) -> (Vec<usize>, Vec<bool>) {
     let order = BidiInfo::reorder_visual(&levels);
     let rtl = levels.iter().map(|level| level.is_rtl()).collect();
     (order, rtl)
+}
+
+/// A row is a right-to-left paragraph when it has at least as many
+/// right-to-left letters as left-to-right ones, so a Persian sentence that
+/// opens with a Latin word still reads from the right.
+fn paragraph_level(bases: &[char]) -> Level {
+    let (mut rtl, mut ltr) = (0usize, 0usize);
+    for c in bases {
+        match bidi_class(*c) {
+            BidiClass::R | BidiClass::AL => rtl += 1,
+            BidiClass::L => ltr += 1,
+            _ => {},
+        }
+    }
+    if rtl > 0 && rtl >= ltr {
+        Level::rtl()
+    } else {
+        Level::ltr()
+    }
 }
 
 pub(super) fn is_rtl_char(c: char) -> bool {
@@ -245,6 +364,24 @@ fn mirror(c: char) -> Option<char> {
         '>' => '<',
         '«' => '»',
         '»' => '«',
+        '‹' => '›',
+        '›' => '‹',
+        '❮' => '❯',
+        '❯' => '❮',
+        '❰' => '❱',
+        '❱' => '❰',
+        '⟨' => '⟩',
+        '⟩' => '⟨',
+        '→' => '←',
+        '←' => '→',
+        '⇒' => '⇐',
+        '⇐' => '⇒',
+        '▶' => '◀',
+        '◀' => '▶',
+        '►' => '◄',
+        '◄' => '►',
+        '⏵' => '⏴',
+        '⏴' => '⏵',
         _ => return None,
     })
 }
@@ -282,6 +419,22 @@ mod tests {
     #[test]
     fn a_persian_line_after_a_neutral_bullet_is_right_to_left() {
         assert_eq!(visual("● باز "), " زاب ●");
+    }
+
+    #[test]
+    fn a_persian_sentence_opening_with_a_latin_word_is_right_to_left() {
+        assert_eq!(visual("Session قبلی فقط یک  "), "  کی طقف یلبق Session");
+    }
+
+    #[test]
+    fn a_latin_line_with_one_persian_word_stays_left_to_right() {
+        assert_eq!(visual("echo the word سلام "), "echo the word مالس ");
+    }
+
+    #[test]
+    fn a_prompt_arrow_points_the_other_way_in_a_right_to_left_row() {
+        assert_eq!(mirror('❯'), Some('❮'));
+        assert_eq!(mirror('→'), Some('←'));
     }
 
     #[test]
@@ -336,6 +489,34 @@ mod tests {
         // trailing blanks go to the left edge and «ab» follows them.
         assert_eq!(column_of('a'), Some(3));
         assert_eq!(column_of('b'), Some(4));
+    }
+
+    #[test]
+    fn a_click_on_reordered_text_maps_to_the_cell_drawn_there() {
+        use crate::testing::painter::Painter;
+
+        let state = Painter::state(1, 10, |painter| painter.text(0, 0, "سلام ab"));
+        // Drawn: three blanks, «ab», a blank, then «سلام» right to left.
+        assert_eq!(logical_column(&state, 0, 3), 5);
+        assert_eq!(logical_column(&state, 0, 4), 6);
+        assert_eq!(logical_column(&state, 0, 9), 0);
+        assert_eq!(logical_column(&state, 0, 0), 9);
+
+        let latin = Painter::state(1, 10, |painter| painter.text(0, 0, "hello"));
+        assert_eq!(logical_column(&latin, 0, 3), 3);
+    }
+
+    #[test]
+    fn a_frame_border_stays_put_and_each_side_reorders_alone() {
+        use crate::testing::painter::Painter;
+
+        // «ab │سلام  »: the bar stays at column 3, the Persian is
+        // right-aligned between the bar and the row end.
+        let state = Painter::state(1, 10, |painter| painter.text(0, 0, "ab │سلام"));
+        assert_eq!(logical_column(&state, 0, 3), 3);
+        assert_eq!(logical_column(&state, 0, 0), 0);
+        assert_eq!(logical_column(&state, 0, 9), 4);
+        assert_eq!(logical_column(&state, 0, 4), 9);
     }
 
     #[test]

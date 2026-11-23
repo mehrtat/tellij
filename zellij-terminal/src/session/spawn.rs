@@ -148,8 +148,47 @@ fn with_display_env(
 
 pub fn resolve_program() -> Result<OsString> {
     std::env::current_exe()
+        .map(replaced_binary)
         .map(PathBuf::into_os_string)
         .context("failed to locate this executable, which is also the session server")
+}
+
+/// When an upgrade replaces the binary under a running terminal, Linux reports
+/// the running image as "<path> (deleted)". The new binary at the original
+/// path is the one to start; without this, every new window fails until the
+/// terminal is restarted.
+fn replaced_binary(path: PathBuf) -> PathBuf {
+    match path.to_str().and_then(|text| text.strip_suffix(" (deleted)")) {
+        Some(original) if Path::new(original).is_file() => PathBuf::from(original),
+        _ => path,
+    }
+}
+
+#[cfg(test)]
+mod replaced_binary_tests {
+    use super::replaced_binary;
+    use std::path::PathBuf;
+
+    #[test]
+    fn an_upgraded_binary_is_found_at_its_original_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let installed = directory.path().join("zellij");
+        std::fs::write(&installed, b"").unwrap();
+        let reported = PathBuf::from(format!("{} (deleted)", installed.display()));
+        assert_eq!(replaced_binary(reported), installed);
+    }
+
+    #[test]
+    fn a_removed_binary_keeps_the_reported_path() {
+        let reported = PathBuf::from("/nonexistent/zellij (deleted)");
+        assert_eq!(replaced_binary(reported.clone()), reported);
+    }
+
+    #[test]
+    fn a_normal_path_is_unchanged() {
+        let path = PathBuf::from("/usr/bin/zellij");
+        assert_eq!(replaced_binary(path.clone()), path);
+    }
 }
 
 pub fn server_command(

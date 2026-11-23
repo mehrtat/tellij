@@ -29,7 +29,7 @@ pub fn ensure_app_running() -> bool {
     if app_is_running() {
         return true;
     }
-    let Ok(program) = std::env::current_exe() else {
+    let Ok(program) = crate::session::spawn::resolve_program() else {
         return false;
     };
     let mut command = std::process::Command::new(program);
